@@ -3,36 +3,36 @@ import json
 import random
 import time
 import uuid
+import os
 from datetime import datetime, timezone
-from math import radians, cos, sin, asin, sqrt
+from kafka import KafkaProducer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_buses", type=int, default=5)
-parser.add_argument("--stream", action="store_true", help="Enable streaming mode")
-parser.add_argument("--interval", type=float, default=1.0, help="Seconds between events")
+parser.add_argument("--interval", type=float, default=1.0)
 args = parser.parse_args()
 
 NUM_BUSES = args.num_buses
-STREAM_MODE = args.stream
 INTERVAL = args.interval
 
+KAFKA_TOPIC = "bus_events"
+KAFKA_SERVER = "localhost:9092"
+
+BRONZE_DIR = "bronze_data"
+BATCH_SIZE = 100
+
+os.makedirs(BRONZE_DIR, exist_ok=True)
 
 # -----------------------------
-# Utilities
+# Kafka Producer
 # -----------------------------
 
-def haversine(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    c = 2 * asin(sqrt(a))
-    return 6371 * c
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_SERVER,
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+)
 
-
-def load_stops():
-    with open("coords.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+print("Connected to Kafka")
 
 
 # -----------------------------
@@ -74,13 +74,10 @@ def generate_event(bus_id, route_id, driver_id, lat, lon, prev_speed):
 # -----------------------------
 
 def run():
-    stops = load_stops()
-
     buses = {
         bus_id: {
             "route_id": f"R{random.randint(100, 500)}",
             "driver_id": random.randint(1, 20),
-            "current_stop": 0,
             "prev_speed": 0
         }
         for bus_id in range(1, NUM_BUSES + 1)
@@ -90,32 +87,34 @@ def run():
 
     while True:
         for bus_id, state in buses.items():
-            stop = stops[state["current_stop"]]
+
+            lat = round(random.uniform(6.20, 6.30), 6)
+            lon = round(random.uniform(-75.65, -75.55), 6)
 
             event, new_speed = generate_event(
                 bus_id,
                 state["route_id"],
                 state["driver_id"],
-                stop["lat"],
-                stop["lng"],
+                lat,
+                lon,
                 state["prev_speed"]
             )
 
             state["prev_speed"] = new_speed
-            state["current_stop"] = (state["current_stop"] + 1) % len(stops)
 
-            # STREAM OUTPUT (Kafka-ready)
-            print(json.dumps(event))
+            # ------------- STREAMING -------------
+            producer.send(KAFKA_TOPIC, event)
 
-            # BATCH BUFFER
+            # ------------- BATCH -------------
             batch_buffer.append(event)
 
-        # Write batch file every 50 events
-        if not STREAM_MODE and len(batch_buffer) >= 50:
-            filename = f"bronze_{int(time.time())}.json"
+        # Flush batch to file
+        if len(batch_buffer) >= BATCH_SIZE:
+            filename = f"{BRONZE_DIR}/bronze_{int(time.time())}.json"
             with open(filename, "w", encoding="utf-8") as f:
                 for e in batch_buffer:
                     f.write(json.dumps(e) + "\n")
+
             print(f"Batch file written: {filename}")
             batch_buffer = []
 
