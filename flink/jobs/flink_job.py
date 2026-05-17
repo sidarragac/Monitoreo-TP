@@ -9,7 +9,6 @@ import json
 from cassandra.cluster import Cluster
 from datetime import datetime
 
-
 # =====================================================
 # FLINK ENVIRONMENT
 # =====================================================
@@ -18,9 +17,8 @@ env = StreamExecutionEnvironment.get_execution_environment()
 
 env.enable_checkpointing(10000)
 
-# Opcional: limitar paralelismo para entorno local
+# entorno local
 env.set_parallelism(1)
-
 
 # =====================================================
 # KAFKA SOURCE
@@ -29,7 +27,7 @@ env.set_parallelism(1)
 source = (
     KafkaSource.builder()
     .set_bootstrap_servers("kafka:29092")
-    .set_topics("bus_events")
+    .set_topics("bus_raw_events")
     .set_group_id("flink-consumer")
     .set_value_only_deserializer(SimpleStringSchema())
     .build()
@@ -41,23 +39,43 @@ ds = env.from_source(
     "Kafka Source"
 )
 
-
 # =====================================================
-# PARSE JSON
+# PARSE + EVENT DETECTION
 # =====================================================
 
 def parse_event(event):
 
     e = json.loads(event)
 
+    speed = float(e["speed_kmh"])
+    acceleration = float(e["acceleration_ms2"])
+
+    # -----------------------------
+    # Realtime Event Detection
+    # -----------------------------
+
+    if speed > 75:
+        event_type = "OVERSPEED"
+
+    elif acceleration < -3:
+        event_type = "HARSH_BRAKE"
+
+    else:
+        event_type = "NORMAL"
+
     return (
         e["route_id"],
-        e["bus_id"],
-        e["driver_id"],
+        int(e["bus_id"]),
+        int(e["driver_id"]),
+
         float(e["lat"]),
         float(e["lon"]),
-        float(e["speed_kmh"]),
-        e["event_type"],
+
+        speed,
+        acceleration,
+
+        event_type,
+
         e["timestamp"]
     )
 
@@ -71,11 +89,11 @@ parsed = ds.map(
         Types.FLOAT(),    # lat
         Types.FLOAT(),    # lon
         Types.FLOAT(),    # speed
+        Types.FLOAT(),    # acceleration
         Types.STRING(),   # event_type
         Types.STRING()    # timestamp
     ])
 )
-
 
 # =====================================================
 # CASSANDRA SINK
@@ -92,13 +110,24 @@ class CassandraSink(MapFunction):
         print("Connecting to Cassandra...")
 
         self.cluster = Cluster(["cassandra"])
+
         self.session = self.cluster.connect("transport")
 
         print("Connected to Cassandra")
 
     def map(self, event):
 
-        route_id, bus_id, driver_id, lat, lon, speed, event_type, ts = event
+        (
+            route_id,
+            bus_id,
+            driver_id,
+            lat,
+            lon,
+            speed,
+            acceleration,
+            event_type,
+            ts
+        ) = event
 
         self.session.execute("""
             INSERT INTO bus_realtime_status (
@@ -109,21 +138,28 @@ class CassandraSink(MapFunction):
                 lat,
                 lon,
                 speed_kmh,
+                acceleration_ms2,
                 event_type
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             bus_id,
-            datetime.fromisoformat(ts.replace("Z", "+00:00")),
+
+            datetime.fromisoformat(
+                ts.replace("Z", "+00:00")
+            ),
+
             route_id,
             driver_id,
+
             lat,
             lon,
+
             speed,
+            acceleration,
+
             event_type
         ))
-
-        print(f"Inserted bus_id={bus_id}")
 
         return event
 
@@ -133,7 +169,6 @@ class CassandraSink(MapFunction):
 
         if self.cluster:
             self.cluster.shutdown()
-
 
 # =====================================================
 # EXECUTE SINK
@@ -148,11 +183,11 @@ parsed.map(
         Types.FLOAT(),
         Types.FLOAT(),
         Types.FLOAT(),
+        Types.FLOAT(),
         Types.STRING(),
         Types.STRING()
     ])
 )
-
 
 # =====================================================
 # EXECUTE JOB
