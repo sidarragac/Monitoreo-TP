@@ -1,3 +1,5 @@
+from random import random
+
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream.connectors.kafka import KafkaSource
@@ -9,20 +11,14 @@ import json
 from cassandra.cluster import Cluster
 from datetime import datetime
 
-# =====================================================
-# FLINK ENVIRONMENT
-# =====================================================
+DATA_FILE = '../data/coords.json'
+
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    ROUTE_POINTS = json.load(f)
 
 env = StreamExecutionEnvironment.get_execution_environment()
-
 env.enable_checkpointing(10000)
-
-# entorno local
 env.set_parallelism(1)
-
-# =====================================================
-# KAFKA SOURCE
-# =====================================================
 
 source = (
     KafkaSource.builder()
@@ -39,51 +35,51 @@ ds = env.from_source(
     "Kafka Source"
 )
 
-# =====================================================
-# PARSE + EVENT DETECTION
-# =====================================================
-
 def parse_event(event):
+    event = json.loads(event)
 
-    e = json.loads(event)
+    speed = float(event["speed_kmh"])
+    acceleration = float(event["acceleration_ms2"])
 
-    speed = float(e["speed_kmh"])
-    acceleration = float(e["acceleration_ms2"])
+    station_number = event["next_station"]
+    lat = round(event["lat"], 6)
+    lon = round(event["lon"], 6)
+    normal_coords = [
+        {
+            "lat": round(point["lat"], 6),
+            "lon": round(point["lon"], 6),
+        }
+        for point in [ROUTE_POINTS[station_number]] + ROUTE_POINTS[station_number]["previous"]
+    ]
+    bus_coords = {
+        "lat": lat,
+        "lon": lon
+    }
 
-    # -----------------------------
-    # Realtime Event Detection
-    # -----------------------------
-
-    if speed > 75:
+    if bus_coords not in normal_coords:
+        event_type = "OFF_ROUTE"
+    elif speed > 75:
         event_type = "OVERSPEED"
-
     elif acceleration < -3:
         event_type = "HARSH_BRAKE"
-
     else:
         event_type = "NORMAL"
 
     return (
-        e["route_id"],
-        int(e["bus_id"]),
-        int(e["driver_id"]),
-
-        float(e["lat"]),
-        float(e["lon"]),
-
+        int(event["bus_id"]),
+        int(event["driver_id"]),
+        lat,
+        lon,
         speed,
         acceleration,
-
         event_type,
-
-        e["timestamp"]
+        event["timestamp"]
     )
 
 
 parsed = ds.map(
     parse_event,
     output_type=Types.TUPLE([
-        Types.STRING(),   # route_id
         Types.INT(),      # bus_id
         Types.INT(),      # driver_id
         Types.FLOAT(),    # lat
@@ -95,12 +91,7 @@ parsed = ds.map(
     ])
 )
 
-# =====================================================
-# CASSANDRA SINK
-# =====================================================
-
 class CassandraSink(MapFunction):
-
     def __init__(self):
         self.cluster = None
         self.session = None
@@ -116,9 +107,7 @@ class CassandraSink(MapFunction):
         print("Connected to Cassandra")
 
     def map(self, event):
-
         (
-            route_id,
             bus_id,
             driver_id,
             lat,
@@ -133,7 +122,6 @@ class CassandraSink(MapFunction):
             INSERT INTO bus_realtime_status (
                 bus_id,
                 event_ts,
-                route_id,
                 driver_id,
                 lat,
                 lon,
@@ -141,43 +129,30 @@ class CassandraSink(MapFunction):
                 acceleration_ms2,
                 event_type
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             bus_id,
-
             datetime.fromisoformat(
                 ts.replace("Z", "+00:00")
             ),
-
-            route_id,
             driver_id,
-
             lat,
             lon,
-
             speed,
             acceleration,
-
             event_type
         ))
 
         return event
 
     def close(self):
-
         print("Closing Cassandra connection")
-
         if self.cluster:
             self.cluster.shutdown()
-
-# =====================================================
-# EXECUTE SINK
-# =====================================================
 
 parsed.map(
     CassandraSink(),
     output_type=Types.TUPLE([
-        Types.STRING(),
         Types.INT(),
         Types.INT(),
         Types.FLOAT(),
@@ -188,9 +163,5 @@ parsed.map(
         Types.STRING()
     ])
 )
-
-# =====================================================
-# EXECUTE JOB
-# =====================================================
 
 env.execute("Bus Monitoring Streaming Job")

@@ -4,12 +4,9 @@ import random
 import time
 import uuid
 from datetime import datetime, timezone
+from random import random, randint, uniform
 
 from kafka import KafkaProducer
-
-# -----------------------------
-# Args
-# -----------------------------
 
 parser = argparse.ArgumentParser()
 
@@ -20,27 +17,16 @@ args = parser.parse_args()
 
 NUM_BUSES = args.num_buses
 INTERVAL = args.interval
-DATA_FILE = "./data/coords.json"
-
-# -----------------------------
-# Kafka Config
-# -----------------------------
+DATA_FILE = "../data/coords.json"
 
 KAFKA_TOPIC = "bus_raw_events"
 KAFKA_SERVER = "localhost:9092"
-
-# -----------------------------
-# Load Route Coordinates
-# -----------------------------
 
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     ROUTE_POINTS = json.load(f)
 
 print(f"Loaded {len(ROUTE_POINTS)} route points")
 
-# -----------------------------
-# Kafka Producer
-# -----------------------------
 
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_SERVER,
@@ -49,102 +35,88 @@ producer = KafkaProducer(
 
 print("Connected to Kafka")
 
-# -----------------------------
-# Event Generator
-# -----------------------------
-
-def generate_event(bus_id, route_id, driver_id, point, prev_speed):
-
-    # velocidad más realista
-    speed = max(0, prev_speed + random.uniform(-12, 12))
-
-    # aceleración aproximada
-    acceleration = (speed - prev_speed) / random.uniform(1, 3)
-
+def generate_event(bus_id, driver_id, station_number, point, prev_speed):
+    speed = max(0, prev_speed + uniform(-12, 12))
+    acceleration = (speed - prev_speed) / uniform(1, 3)
     now = datetime.now(timezone.utc)
+
+    lat = round(point["lat"], 6)
+    lon = round(point["lon"], 6)
+    
+    # 1 de cada 10 eventos sale fuera de la ruta esperada
+    if random() < 0.1:
+        lat += 0.05 if random() < 0.5 else -0.05
+        lon += 0.05 if random() < 0.5 else -0.05
 
     event = {
         "event_id": str(uuid.uuid4()),
-
         "bus_id": bus_id,
-        "route_id": route_id,
         "driver_id": driver_id,
-
-        "station_name": point["name"],
-        "station_order": point["order"],
-
+        "next_station": station_number,
         "timestamp": now.isoformat(),
-
-        "lat": round(point["lat"], 6),
-        "lon": round(point["lon"], 6),
-
+        "lat": lat,
+        "lon": lon,
         "speed_kmh": round(speed, 2),
         "acceleration_ms2": round(acceleration, 2),
 
-        # RAW telemetry only
         "ingestion_ts": datetime.now(timezone.utc).isoformat()
     }
 
     return event, speed
 
-# -----------------------------
-# Main Simulation
-# -----------------------------
-
 def run():
-
     buses = {}
 
     for bus_id in range(1, NUM_BUSES + 1):
-
+        route_index = randint(0, len(ROUTE_POINTS) - 1)
         buses[bus_id] = {
-            "route_id": f"R{random.randint(100, 500)}",
-            "driver_id": random.randint(1, 20),
-
-            "prev_speed": random.uniform(20, 40),
-
-            # posición inicial en la ruta
-            "route_index": random.randint(0, len(ROUTE_POINTS) - 1)
+            "driver_id": randint(1, 20),
+            "prev_speed": uniform(20, 40),
+            "route_index": route_index,
+            "previous_point": 0
         }
 
     while True:
-
         for bus_id, state in buses.items():
+            station = ROUTE_POINTS[state["route_index"]]
 
-            point = ROUTE_POINTS[state["route_index"]]
+            is_station = False
+            point = {}
 
-            point["order"] = state["route_index"] + 1
+            if state["previous_point"] == (len(station["previous"]) -1):
+                is_station = True
+                point = {
+                    "lat": station["lat"],
+                    "lon": station["lon"]
+                }
+            else:
+                point = station["previous"][state["previous_point"]]
 
             event, new_speed = generate_event(
                 bus_id,
-                state["route_id"],
                 state["driver_id"],
+                state["route_index"],
                 point,
                 state["prev_speed"]
             )
 
             state["prev_speed"] = new_speed
 
-            # avanzar en la ruta
-            state["route_index"] += 1
+            if is_station:
+                state["route_index"] += 1
+                state["previous_point"] = 0
+            else:
+                state["previous_point"] += 1
 
-            # reiniciar ruta
             if state["route_index"] >= len(ROUTE_POINTS):
                 state["route_index"] = 0
-
-            # -----------------------------
-            # Send to Kafka
-            # -----------------------------
+                state["previous_point"] = 0
 
             producer.send(KAFKA_TOPIC, event)
 
         producer.flush()
 
         time.sleep(INTERVAL)
-
-# -----------------------------
-# Main
-# -----------------------------
 
 if __name__ == "__main__":
     run()

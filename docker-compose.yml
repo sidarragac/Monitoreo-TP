@@ -53,6 +53,7 @@ services:
       JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
     volumes:
       - ./flink/jobs:/opt/flink/jobs:ro
+      - ./data:/opt/flink/data:ro
 
   flink-taskmanager:
     build:
@@ -91,18 +92,25 @@ services:
   # ICEBERG REST CATALOG
   # -----------------------
   iceberg-rest:
-    image: tabulario/iceberg-rest:latest
-    depends_on:
-      - minio
+    image: tabulario/iceberg-rest
+
     ports:
       - "8181:8181"
+
     environment:
-      CATALOG_WAREHOUSE: s3://warehouse/
-      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_WAREHOUSE: s3a://warehouse/
+
       AWS_ACCESS_KEY_ID: admin
       AWS_SECRET_ACCESS_KEY: password
       AWS_REGION: us-east-1
-      S3_ENDPOINT: http://minio:9000
+
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH_STYLE_ACCESS: "true"
+
+    depends_on:
+      - minio
 
   # -----------------------
   # SPARK
@@ -112,7 +120,7 @@ services:
     ports:
       - "4040:4040"
     volumes:
-      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/jobs:/opt/bitnami/spark/jobs:ro
 
 volumes:
   minio_data:
