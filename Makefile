@@ -77,8 +77,7 @@ cassandra-init:
 
 bronze:
 	docker exec -it monitoreo-tp-spark-1 spark-submit \
-		--repositories https://repo1.maven.org/maven2 \
-		--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0 \
+		--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0,org.apache.hadoop:hadoop-aws:3.3.4 \
 		/opt/bitnami/spark/jobs/bronze.py
 
 
@@ -87,7 +86,9 @@ bronze:
 # =========================================
 
 silver:
-	spark-submit spark/silver_job.py
+		docker exec -it monitoreo-tp-spark-1 spark-submit \
+		--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+		/opt/bitnami/spark/jobs/silver.py
 
 
 # =========================================

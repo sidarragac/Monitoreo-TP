@@ -1,88 +1,95 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
-from pyspark.sql.types import *
+from pyspark.sql.functions import (
+    from_json, col, to_timestamp, current_timestamp, lit
+)
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType, DoubleType
+)
+
+# ==========================================
+# Spark Session
+# ==========================================
 
 spark = SparkSession.builder \
-    .appName("Silver Layer") \
+    .appName("Bronze Ingestion") \
+    .config("spark.jars.packages",
+        "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2,"
+        "org.apache.hadoop:hadoop-aws:3.3.4,"
+        "com.amazonaws:aws-java-sdk-bundle:1.12.262") \
     .config("spark.sql.catalog.demo", "org.apache.iceberg.spark.SparkCatalog") \
     .config("spark.sql.catalog.demo.type", "rest") \
-    .config("spark.sql.catalog.demo.uri", "http://iceberg-rest:8181") \
-    .config("spark.sql.catalog.demo.warehouse", "s3://warehouse/") \
-    .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
+    .config("spark.sql.catalog.demo.uri", "http://monitoreo-tp-iceberg-rest-1:8181") \
+    .config("spark.sql.catalog.demo.warehouse", "s3a://warehouse/") \
+    .config("spark.sql.catalog.demo.io-impl", "org.apache.iceberg.aws.s3.S3FileIO") \
+    .config("spark.sql.catalog.demo.s3.endpoint", "http://monitoreo-tp-minio-1:9000") \
+    .config("spark.sql.catalog.demo.s3.path-style-access", "true") \
+    .config("spark.sql.catalog.demo.s3.region", "us-east-1") \
+    .config("spark.hadoop.fs.s3a.endpoint", "http://monitoreo-tp-minio-1:9000") \
     .config("spark.hadoop.fs.s3a.access.key", "admin") \
     .config("spark.hadoop.fs.s3a.secret.key", "password") \
     .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.endpoint.region", "us-east-1") \
     .getOrCreate()
 
-df = spark.read.table("demo.transport.bronze_bus_events")
+# ==========================================
+# Schema del JSON
+# ==========================================
 
-# -----------------------------
-# CLEANING
-# -----------------------------
+schema = StructType([
+    StructField("event_id",          StringType(),  True),
+    StructField("bus_id",            IntegerType(), True),
+    StructField("driver_id",         IntegerType(), True),
+    StructField("next_station",      IntegerType(), True),
+    StructField("timestamp",         StringType(),  True),
+    StructField("lat",               DoubleType(),  True),
+    StructField("lon",               DoubleType(),  True),
+    StructField("speed_kmh",         DoubleType(),  True),
+    StructField("acceleration_ms2",  DoubleType(),  True),
+    StructField("ingestion_ts",      StringType(),  True),
+])
 
-df = df.filter(col("lat").isNotNull()) \
-       .filter(col("lon").isNotNull()) \
-       .filter(col("speed_kmh") > 0)
+# ==========================================
+# Leer Bronze
+# ==========================================
 
-# -----------------------------
-# CAST TIMESTAMP
-# -----------------------------
+bronze_df = spark.read.table("demo.bronze.transactions")
 
-df = df.withColumn(
-    "event_time",
-    to_timestamp("timestamp")
+# ==========================================
+# Parsear JSON + castear tipos
+# ==========================================
+
+parsed_df = bronze_df \
+    .select(from_json(col("value"), schema).alias("data")) \
+    .select("data.*") \
+    .withColumn("event_ts",    to_timestamp(col("timestamp"))) \
+    .withColumn("ingestion_ts", to_timestamp(col("ingestion_ts"))) \
+    .withColumn("processed_at", current_timestamp()) \
+    .withColumn("source_topic", lit("bus_raw_events")) \
+    .drop("timestamp")  # reemplazada por event_ts tipada
+
+# ==========================================
+# Validación — descartar filas corruptas
+# ==========================================
+
+clean_df = parsed_df.filter(
+    col("event_id").isNotNull() &
+    col("bus_id").isNotNull() &
+    col("lat").isNotNull() &
+    col("lon").isNotNull() &
+    col("event_ts").isNotNull() &
+    col("lat").between(-90, 90) &
+    col("lon").between(-180, 180) &
+    (col("speed_kmh") >= lit(0)) 
 )
 
-# -----------------------------
-# CALCULATED COLUMNS
-# -----------------------------
+# ==========================================
+# Crear namespace y escribir Silver
+# ==========================================
 
-df = df.withColumn(
-    "risk_level",
-    when(col("speed_kmh") > 80, "HIGH")
-    .when(col("speed_kmh") > 60, "MEDIUM")
-    .otherwise("LOW")
-)
+spark.sql("CREATE NAMESPACE IF NOT EXISTS demo.silver")
 
-# -----------------------------
-# DIMENSION TABLE
-# -----------------------------
-
-routes = [
-    ("R101", "North"),
-    ("R202", "South"),
-    ("R303", "Center")
-]
-
-routes_df = spark.createDataFrame(
-    routes,
-    ["route_id", "zone"]
-)
-
-df = df.join(routes_df, on="route_id", how="left")
-
-# -----------------------------
-# WRITE SILVER
-# -----------------------------
-
-spark.sql("""
-CREATE TABLE IF NOT EXISTS demo.transport.silver_bus_events (
-    route_id STRING,
-    zone STRING,
-    event_id STRING,
-    bus_id INT,
-    driver_id INT,
-    event_time TIMESTAMP,
-    lat DOUBLE,
-    lon DOUBLE,
-    speed_kmh DOUBLE,
-    acceleration_ms2 DOUBLE,
-    event_type STRING,
-    risk_level STRING
-)
-USING iceberg
-""")
-
-df.writeTo("demo.transport.silver_bus_events").overwritePartitions()
-
-print("Silver layer ready")
+clean_df.writeTo("demo.silver.bus_events") \
+    .tableProperty("write.format.default", "parquet") \
+    .createOrReplace()

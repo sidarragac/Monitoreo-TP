@@ -98,7 +98,7 @@ services:
       - "8181:8181"
 
     environment:
-      CATALOG_WAREHOUSE: s3a://warehouse/
+      CATALOG_WAREHOUSE: s3://warehouse/
 
       AWS_ACCESS_KEY_ID: admin
       AWS_SECRET_ACCESS_KEY: password
@@ -106,8 +106,10 @@ services:
 
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
 
-      CATALOG_S3_ENDPOINT: http://minio:9000
-      CATALOG_S3_PATH_STYLE_ACCESS: "true"
+      CATALOG_S3_ENDPOINT: http://monitoreo-tp-minio-1:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_S3_ACCESS_KEY: admin
+      CATALOG_S3_SECRET_KEY: password
 
     depends_on:
       - minio
@@ -117,10 +119,36 @@ services:
   # -----------------------
   spark:
     image: bitnamilegacy/spark:3.5.0
+
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1          
+      AWS_DEFAULT_REGION: us-east-1  
+
     ports:
       - "4040:4040"
+    
     volumes:
       - ./spark/jobs:/opt/bitnami/spark/jobs:ro
+
+  # -----------------------
+  # JUPYTER
+  # -----------------------
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+    depends_on:
+      - cassandra
+      - kafka
+      - spark
 
 volumes:
   minio_data:
