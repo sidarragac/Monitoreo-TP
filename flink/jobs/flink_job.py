@@ -1,24 +1,27 @@
-from random import random
-
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream.connectors.kafka import KafkaSource
 from pyflink.common.watermark_strategy import WatermarkStrategy
 from pyflink.common.typeinfo import Types
-from pyflink.datastream.functions import MapFunction
+from pyflink.datastream.functions import MapFunction, ProcessWindowFunction
+from pyflink.datastream.window import TumblingProcessingTimeWindows
+from pyflink.common.time import Time
 
 import json
 from cassandra.cluster import Cluster
 from datetime import datetime
 
 # Cargar datos de la ruta desde el archivo JSON
-DATA_FILE = '../data/coords.json'
+DATA_FILE = 'data/coords.json'
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     ROUTE_POINTS = json.load(f)
 
 # Configuración del entorno de ejecución de Flink
 env = StreamExecutionEnvironment.get_execution_environment()
+
+# Checkpointing configurado para garantizar al menos una vez (at-least-once) de procesamiento
 env.enable_checkpointing(10000)
+
 env.set_parallelism(1)
 
 # Configuración del Kafka Source para consumir eventos de bus
@@ -99,7 +102,7 @@ parsed = ds.map(
     ])
 )
 
-class CassandraSink(MapFunction):
+class CassandraRealtimeSink(MapFunction):
     def __init__(self):
         self.cluster = None
         self.session = None
@@ -107,8 +110,10 @@ class CassandraSink(MapFunction):
     # Método para establecer la conexión con Cassandra al abrir el sink
     def open(self, runtime_context):
         print("Connecting to Cassandra...")
+
         self.cluster = Cluster(["cassandra"])
         self.session = self.cluster.connect("transport")
+
         print("Connected to Cassandra")
 
     # Método para procesar cada evento y almacenarlo en la tabla bus_realtime_status de Cassandra
@@ -124,7 +129,7 @@ class CassandraSink(MapFunction):
             ts
         ) = event
 
-        self.session.execute("""
+        self.session.execute_async("""
             INSERT INTO bus_realtime_status (
                 bus_id,
                 event_ts,
@@ -158,7 +163,7 @@ class CassandraSink(MapFunction):
 
 # Aplicar el CassandraSink para almacenar los eventos procesados en Cassandra
 parsed.map(
-    CassandraSink(),
+    CassandraRealtimeSink(),
     output_type=Types.TUPLE([
         Types.INT(),
         Types.INT(),
@@ -167,6 +172,129 @@ parsed.map(
         Types.FLOAT(),
         Types.FLOAT(),
         Types.STRING(),
+        Types.STRING()
+    ])
+)
+
+# Función para procesar los eventos dentro de cada ventana y calcular las métricas agregadas por bus
+class MetricsWindowFunction(ProcessWindowFunction):
+
+    def process(self, key, context, elements):
+        events = list(elements)
+        bus_id = key
+        avg_speed = sum(event[4] for event in events) / len(events)
+
+        # Contar el número de eventos de cada tipo (OVERSPEED, HARSH_BRAKE, OFF_ROUTE) dentro de la ventana
+        overspeed_count = len([
+            event for event in events
+            if event[6] == "OVERSPEED"
+        ])
+
+        harsh_brake_count = len([
+            event for event in events
+            if event[6] == "HARSH_BRAKE"
+        ])
+
+        off_route_count = len([
+            event for event in events
+            if event[6] == "OFF_ROUTE"
+        ])
+
+        yield (
+            bus_id,
+            round(avg_speed, 2),
+            overspeed_count,
+            harsh_brake_count,
+            off_route_count,
+            len(events),
+            datetime.utcnow().isoformat()
+        )
+
+# Aplicar una ventana de tumbling de 30 segundos para calcular las métricas agregadas por bus
+windowed_metrics = (
+    parsed
+    .key_by(lambda x: x[0])  # bus_id
+    .window(
+        TumblingProcessingTimeWindows.of(
+            Time.seconds(30)
+        )
+    )
+    .process(
+        MetricsWindowFunction(),
+        output_type=Types.TUPLE([
+            Types.INT(),      # bus_id
+            Types.FLOAT(),    # avg_speed
+            Types.INT(),      # overspeed_count
+            Types.INT(),      # harsh_brake_count
+            Types.INT(),      # off_route_count
+            Types.INT(),      # total_events
+            Types.STRING()    # window_ts
+        ])
+    )
+)
+
+
+class CassandraMetricsSink(MapFunction):
+    def __init__(self):
+        self.cluster = None
+        self.session = None
+
+    def open(self, runtime_context):
+        self.cluster = Cluster(["cassandra"])
+        self.session = self.cluster.connect("transport")
+
+    # Método para procesar cada métrica agregada por bus y almacenarla en la tabla bus_window_metrics de Cassandra
+    def map(self, metric):
+        (
+            bus_id,
+            avg_speed,
+            overspeed_count,
+            harsh_brake_count,
+            off_route_count,
+            total_events,
+            window_ts
+        ) = metric
+
+        self.session.execute_async("""
+            INSERT INTO bus_window_metrics (
+                bus_id,
+                window_ts,
+                avg_speed,
+                overspeed_count,
+                harsh_brake_count,
+                off_route_count,
+                total_events
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            bus_id,
+            datetime.fromisoformat(
+                window_ts.replace("Z", "+00:00")
+            ),
+            avg_speed,
+            overspeed_count,
+            harsh_brake_count,
+            off_route_count,
+            total_events
+        ))
+
+        return metric
+
+    def close(self):
+
+        if self.cluster:
+            self.cluster.shutdown()
+
+# Aplicar el CassandraSink para almacenar las métricas agregadas por bus en Cassandra
+windowed_metrics.map(
+    CassandraMetricsSink(),
+    output_type=Types.TUPLE([
+        Types.INT(),
+        Types.FLOAT(),
+        Types.INT(),
+        Types.INT(),
+        Types.INT(),
+        Types.INT(),
         Types.STRING()
     ])
 )
