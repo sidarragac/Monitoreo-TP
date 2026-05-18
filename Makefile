@@ -11,7 +11,7 @@ kafka-topic-create:
 		--topic bus_raw_events \
 		--bootstrap-server localhost:29092 \
 		--partitions 2 \
-		--replication-factor 1
+		--replication-factor 1 \
 		--config retention.ms=86400000
 
 kafka-list-topics:
