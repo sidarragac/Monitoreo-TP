@@ -36,7 +36,7 @@ producer:
 
 flink-run:
 	docker exec -it flink-jobmanager \
-		flink run -py /opt/flink/jobs/flink_job.py
+		flink run -d -py jobs/flink_job.py
 
 flink-list:
 	docker exec -it flink-jobmanager \
