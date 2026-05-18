@@ -11,15 +11,17 @@ import json
 from cassandra.cluster import Cluster
 from datetime import datetime
 
+# Cargar datos de la ruta desde el archivo JSON
 DATA_FILE = '../data/coords.json'
-
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     ROUTE_POINTS = json.load(f)
 
+# Configuración del entorno de ejecución de Flink
 env = StreamExecutionEnvironment.get_execution_environment()
 env.enable_checkpointing(10000)
 env.set_parallelism(1)
 
+# Configuración del Kafka Source para consumir eventos de bus
 source = (
     KafkaSource.builder()
     .set_bootstrap_servers("kafka:29092")
@@ -35,6 +37,7 @@ ds = env.from_source(
     "Kafka Source"
 )
 
+# Función para procesar cada evento de bus y determinar su tipo (NORMAL, OFF_ROUTE, OVERSPEED, HARSH_BRAKE)
 def parse_event(event):
     event = json.loads(event)
 
@@ -44,6 +47,8 @@ def parse_event(event):
     station_number = event["next_station"]
     lat = round(event["lat"], 6)
     lon = round(event["lon"], 6)
+
+    # Crear una lista de coordenadas normales para la estación actual y las anteriores
     normal_coords = [
         {
             "lat": round(point["lat"], 6),
@@ -56,15 +61,17 @@ def parse_event(event):
         "lon": lon
     }
 
+    # Determinar el tipo de evento basado en la posición, velocidad y aceleración del bus
     if bus_coords not in normal_coords:
         event_type = "OFF_ROUTE"
-    elif speed > 75:
+    elif speed > ROUTE_POINTS[station_number]["max_speed"]:
         event_type = "OVERSPEED"
     elif acceleration < -3:
         event_type = "HARSH_BRAKE"
     else:
         event_type = "NORMAL"
 
+    # Devolver una tupla con los datos almacenados del evento
     return (
         int(event["bus_id"]),
         int(event["driver_id"]),
@@ -77,6 +84,7 @@ def parse_event(event):
     )
 
 
+# Aplicar la función de procesamiento a cada evento del stream y definir el tipo de salida
 parsed = ds.map(
     parse_event,
     output_type=Types.TUPLE([
@@ -96,16 +104,14 @@ class CassandraSink(MapFunction):
         self.cluster = None
         self.session = None
 
+    # Método para establecer la conexión con Cassandra al abrir el sink
     def open(self, runtime_context):
-
         print("Connecting to Cassandra...")
-
         self.cluster = Cluster(["cassandra"])
-
         self.session = self.cluster.connect("transport")
-
         print("Connected to Cassandra")
 
+    # Método para procesar cada evento y almacenarlo en la tabla bus_realtime_status de Cassandra
     def map(self, event):
         (
             bus_id,
@@ -150,6 +156,7 @@ class CassandraSink(MapFunction):
         if self.cluster:
             self.cluster.shutdown()
 
+# Aplicar el CassandraSink para almacenar los eventos procesados en Cassandra
 parsed.map(
     CassandraSink(),
     output_type=Types.TUPLE([

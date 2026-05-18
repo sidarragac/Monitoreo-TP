@@ -1,3 +1,5 @@
+.PHONY: producer
+
 # =========================================
 # Kafka
 # =========================================
@@ -10,6 +12,7 @@ kafka-topic-create:
 		--bootstrap-server localhost:29092 \
 		--partitions 2 \
 		--replication-factor 1
+		--config retention.ms=86400000
 
 kafka-list-topics:
 	docker exec -it monitoreo-tp-kafka-1 kafka-topics \
@@ -22,7 +25,8 @@ kafka-list-topics:
 # =========================================
 
 producer:
-	python producer/main.py \
+	cd producer && \
+	python main.py \
 		--num_buses 10
 
 
@@ -72,9 +76,10 @@ cassandra-init:
 # =========================================
 
 bronze:
-	spark-submit \
-		--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0 \
-		spark/bronze_job.py
+	docker exec -it monitoreo-tp-spark-1 spark-submit \
+		--repositories https://repo1.maven.org/maven2 \
+		--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0 \
+		/opt/bitnami/spark/jobs/bronze.py
 
 
 # =========================================
